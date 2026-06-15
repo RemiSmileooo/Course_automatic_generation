@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Optional
+from uuid import uuid4
 
 from .config import settings
 from .models import Course
@@ -67,22 +68,40 @@ def compose_course(
     if not clips:
         raise RuntimeError("没有可合成的片段")
 
-    final = concatenate_videoclips(clips, method="chain")
-    log("写出 MP4（编码中）…")
-    final.write_videofile(
-        str(out_path),
-        fps=settings.fps,
-        codec="libx264",
-        audio_codec="aac",
-        threads=4,
-        preset="medium",
-        logger=None,
-    )
-
-    final.close()
-    for a in audios:
+    final = None
+    temp_audio = out_path.parent / f".{out_path.stem}_{uuid4().hex}_audio.m4a"
+    try:
+        final = concatenate_videoclips(clips, method="chain")
+        log("写出 MP4（编码中）…")
+        final.write_videofile(
+            str(out_path),
+            fps=settings.fps,
+            codec="libx264",
+            audio_codec="aac",
+            temp_audiofile=str(temp_audio),
+            # MoviePy 在 Windows 上偶尔会在 ffmpeg 刚退出时删除失败，
+            # 即使 output.mp4 已经写完也会把任务判为失败。统一在 finally 容错清理。
+            remove_temp=False,
+            threads=4,
+            preset="medium",
+            logger=None,
+        )
+    finally:
+        if final is not None:
+            final.close()
+        for clip in clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
+        for audio in audios:
+            try:
+                audio.close()
+            except Exception:
+                pass
         try:
-            a.close()
-        except Exception:
+            temp_audio.unlink(missing_ok=True)
+        except OSError:
+            # Windows 上 ffmpeg 退出瞬间可能仍持有句柄；唯一文件名可避免影响后续任务。
             pass
     return str(out_path)

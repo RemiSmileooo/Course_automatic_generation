@@ -20,18 +20,25 @@ except Exception:
 
 from src import pipeline
 from src.config import settings, THEMES
+from src.documents import DocumentParseError, parse_document_path, supported_file_hint
 
 
 def main():
     parser = argparse.ArgumentParser(description="AI 自动化课程视频生成系统")
-    parser.add_argument("--input", "-i", default="data/sample_input.txt", help="上课文案路径")
+    parser.add_argument(
+        "--input", "-i", default="data/sample_input.txt",
+        help=f"上课文档路径（支持 {supported_file_hint()}）",
+    )
     parser.add_argument("--out", "-o", default=None, help="输出目录（默认 runs/时间戳）")
     parser.add_argument("--no-subtitle", action="store_true", help="不叠加字幕")
     parser.add_argument("--theme", choices=list(THEMES.keys()), default=None, help="视觉主题")
     parser.add_argument("--voice", default=None, help="MiniMax 音色 voice_id（见 config.MINIMAX_VOICES）")
     args = parser.parse_args()
 
-    text = Path(args.input).read_text(encoding="utf-8")
+    try:
+        text = parse_document_path(args.input)
+    except DocumentParseError as exc:
+        parser.error(str(exc))
     run_dir = Path(args.out) if args.out else Path("runs") / datetime.now().strftime("%Y%m%d_%H%M%S")
 
     print("=" * 60)

@@ -51,6 +51,8 @@ def export_pptx(course: Course, out_path: str | Path, theme_name: str | None = N
 
         if slide_data.kind == "cover":
             _build_cover(slide, slide_data, th, W, H)
+        elif slide_data.layout == "table" and slide_data.table_rows:
+            _build_table(slide, slide_data, th, W, H)
         else:
             _build_content(slide, slide_data, th, W, H)
 
@@ -129,5 +131,63 @@ def _build_content(slide, data, th, W, H) -> None:
         # 文本
         run = p.add_run()
         run.text = bullet
-        run.font.size = Pt(22)
+        run.font.size = Pt(22 if len(data.bullets) <= 4 else 18)
         run.font.color.rgb = _rgb(th.text)
+
+
+def _build_table(slide, data, th, W, H) -> None:
+    _build_title(slide, data.title, th, W)
+    headers = data.table_headers or [f"列 {i + 1}" for i in range(max(len(r) for r in data.table_rows))]
+    col_count = max(1, len(headers), *(len(row) for row in data.table_rows))
+    headers = headers + [""] * (col_count - len(headers))
+    rows = [row + [""] * (col_count - len(row)) for row in data.table_rows]
+
+    shape = slide.shapes.add_table(
+        len(rows) + 1,
+        col_count,
+        Inches(0.75),
+        Inches(1.85),
+        W - Inches(1.5),
+        H - Inches(2.25),
+    )
+    table = shape.table
+    if col_count == 2:
+        table.columns[0].width = Inches(3.4)
+        table.columns[1].width = W - Inches(1.5) - Inches(3.4)
+
+    for ci, value in enumerate(headers):
+        _style_table_cell(table.cell(0, ci), value, th.accent, (255, 255, 255), bold=True, size=16)
+    for ri, row in enumerate(rows, start=1):
+        fill = th.bg_bottom if ri % 2 else th.bg_top
+        for ci, value in enumerate(row):
+            _style_table_cell(table.cell(ri, ci), value, fill, th.text, bold=(ci == 0), size=14)
+
+
+def _build_title(slide, title: str, th, W) -> None:
+    tb = slide.shapes.add_textbox(Inches(0.75), Inches(0.42), W - Inches(1.5), Inches(0.8))
+    p = tb.text_frame.paragraphs[0]
+    run = p.add_run()
+    run.text = title
+    run.font.size = Pt(28)
+    run.font.bold = True
+    run.font.color.rgb = _rgb(th.title)
+    line = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.78), Inches(1.35), Inches(2.2), Pt(5))
+    line.fill.solid()
+    line.fill.fore_color.rgb = _rgb(th.accent)
+    _no_line(line)
+
+
+def _style_table_cell(cell, text: str, fill_color: tuple, text_color: tuple, bold: bool, size: int) -> None:
+    cell.fill.solid()
+    cell.fill.fore_color.rgb = _rgb(fill_color)
+    cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+    tf = cell.text_frame
+    tf.clear()
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.LEFT
+    run = p.add_run()
+    run.text = text
+    run.font.size = Pt(size)
+    run.font.bold = bold
+    run.font.color.rgb = _rgb(text_color)

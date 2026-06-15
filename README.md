@@ -8,14 +8,37 @@
 
 项目同时提供命令行入口和 FastAPI Web 界面，支持多套视觉主题、MiniMax 音色选择，以及 LLM/TTS 失败时的自动降级。
 
+## 快速开始
+
+```powershell
+git clone https://github.com/RemiSmileooo/AI_tutor_video_generate.git
+cd AI_tutor_video_generate
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+uvicorn app:app --host 127.0.0.1 --port 8000
+```
+
+然后打开 `http://127.0.0.1:8000`。
+
+至少需要配置：
+
+- 处理 PDF：在 `.env` 中填写 `MINERU_API_KEY`
+- 使用 LLM 拆课：填写 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_MODEL`
+- 使用 MiniMax 配音：填写 `MINIMAX_API_KEY` 和 `MINIMAX_GROUP_ID`
+
+LLM 和 MiniMax 未配置时系统可以降级运行；PDF 解析必须配置 MinerU Token。
+
 ---
 
 ## 1. 系统能力
 
 输入：
 
-- 一篇 UTF-8 编码的 `.txt` 课程文稿
-- 或通过 Web 页面直接粘贴课程文稿
+- 通过 Web 页面直接粘贴课程文稿
+- 上传 TXT、Markdown、PDF 或 Word（`.docx`）文档
+- CLI 通过 `--input` 读取上述任一格式
 
 处理：
 
@@ -30,6 +53,8 @@
 
 ```text
 runs/<run_id>/
+├── 00_input.txt       # 文档解析后、实际送入课程拆解的标准化文本
+├── 00_status.json     # LLM 是否成功、降级原因、主题和音色
 ├── 01_structure.json
 ├── 02_scripts.json
 ├── 03_with_audio.json
@@ -64,6 +89,8 @@ runs/<run_id>/
 | FFmpeg | imageio-ffmpeg | 为 MoviePy 提供内置 FFmpeg |
 | 配置 | python-dotenv | 从 `.env` 加载本地配置 |
 | 文件上传 | python-multipart | 解析 FastAPI 表单和上传文件 |
+| PDF 解析 | MinerU 精准解析 API | PDF 版面、表格、公式和 OCR 转 Markdown |
+| Word 解析 | python-docx | 按原始顺序提取 DOCX 段落、列表和表格 |
 
 系统不依赖 ImageMagick。字幕和高亮均由 Pillow 直接绘制。
 
@@ -72,35 +99,29 @@ runs/<run_id>/
 ## 3. 总体架构
 
 ```text
-                         ┌─────────────────┐
-                         │ CLI: main.py    │
-                         └────────┬────────┘
-                                  │
-输入文稿 ─────────────────────────┼───────┐
-                                  │       │
-                         ┌────────▼───────▼─┐
-                         │ Web: app.py      │
-                         │ FastAPI + Thread │
-                         └────────┬─────────┘
-                                  │ pipeline.run()
-                         ┌────────▼─────────┐
-                         │ src/pipeline.py  │
-                         │ 端到端流程编排    │
-                         └────────┬─────────┘
-                                  │
-        ┌─────────────┬───────────┼───────────┬──────────────┐
-        │             │           │           │              │
- ┌──────▼─────┐ ┌─────▼─────┐ ┌──▼────────┐ ┌▼───────────┐ ┌▼─────────┐
- │ src/llm.py │ │ pptx_export│ │ src/tts.py│ │src/slides.py│ │src/video │
- │ 结构与口播  │ │ 可编辑 PPT │ │ 语音合成  │ │图片与字幕渲染│ │视频合成  │
- └──────┬─────┘ └─────┬─────┘ └──┬────────┘ └┬───────────┘ └┬─────────┘
-        │             │           │           │              │
-        └─────────────┴───────────┴─────┬─────┴──────────────┘
-                                        │
-                              ┌─────────▼─────────┐
-                              │ src/models.py     │
-                              │ Course 数据模型    │
-                              └───────────────────┘
+粘贴文本 / TXT / Markdown / DOCX / PDF
+                  │
+          CLI main.py / Web app.py
+                  │
+          src/documents.py
+          统一文档解析与清理
+                  │
+        PDF ──────┴────── 其他格式
+         │                    │
+   src/mineru.py              │
+   PDF -> full.md             │
+         └──────────┬─────────┘
+                    │ 标准化课程文本
+             src/pipeline.py
+                    │
+       ┌────────────┼────────────┬────────────┬────────────┐
+       │            │            │            │            │
+   src/llm.py  pptx_export.py src/tts.py src/slides.py src/video.py
+   结构与口播    可编辑 PPT     语音合成    页面渲染      视频合成
+       └────────────┴────────────┴────────────┴────────────┘
+                            │
+                     src/models.py
+                     Course 数据模型
 ```
 
 `src/pipeline.py` 是系统中心。CLI 和 Web 层都不直接操作 LLM、TTS 或视频模块，而是统一调用 `pipeline.run()`。
@@ -122,6 +143,8 @@ mianshi/
 └── src/
     ├── __init__.py         # 包标识与版本号
     ├── config.py           # 配置、主题、音色、字体探测
+    ├── documents.py        # TXT/Markdown/PDF/DOCX 文档解析与清理
+    ├── mineru.py           # MinerU PDF 上传、轮询和 Markdown 下载
     ├── models.py           # Course/Slide/Segment/Caption
     ├── llm.py              # 课程拆解、口播润色、规则兜底
     ├── tts.py              # MiniMax/Edge/Offline TTS
@@ -164,6 +187,9 @@ Course
 |---|---|---|
 | `title` | `str` | 页面标题 |
 | `bullets` | `list[str]` | 页面展示的要点 |
+| `layout` | `str` | `bullets` 或 `table` |
+| `table_headers` | `list[str]` | 表格页表头 |
+| `table_rows` | `list[list[str]]` | 表格页数据行 |
 | `segments` | `list[Segment]` | 该页的讲解片段 |
 | `index` | `int` | 页面序号 |
 | `kind` | `str` | `cover`、`content` 或 `summary` |
@@ -223,11 +249,12 @@ pipeline.run(
 LLM 提示词要求模型输出 JSON，包括：
 
 - 课程标题和副标题
-- 6 到 10 页幻灯片
+- 按文稿长度生成 8 到 20 页，长文通常为 14 到 20 页
 - 页面类型
-- 每页标题和 2 到 4 条要点
+- 每页标题和 3 到 6 条完整要点
+- 公司对比、分类矩阵和排名使用原生表格布局
 - 页面过渡讲解
-- 与每条要点一一对应的讲解稿
+- 与每条要点或表格行一一对应的讲解稿
 
 LLM 返回结果经 `_course_from_struct()` 转为项目内部数据模型。函数会自动补齐不足的 `bullet_scripts`，防止要点与讲解数量不一致导致越界。
 
@@ -336,7 +363,7 @@ Preset：medium
 负责：
 
 - 解析输入文件、输出目录、主题、音色和字幕参数
-- 读取 UTF-8 文稿
+- 通过统一解析层读取 TXT、Markdown、PDF 或 DOCX
 - 创建默认时间戳输出目录
 - 打印 LLM/TTS 配置
 - 将进度回调转换为控制台进度条
@@ -345,7 +372,7 @@ Preset：medium
 参数：
 
 ```text
---input, -i       输入文稿，默认 data/sample_input.txt
+--input, -i       输入文档，支持 txt/md/markdown/pdf/docx
 --out, -o         输出目录，默认 runs/<时间戳>
 --no-subtitle     不渲染字幕
 --theme           视觉主题
@@ -370,7 +397,7 @@ FastAPI 后端和单页前端都在此文件中。
 
 前端使用原生 HTML/CSS/JavaScript：
 
-- 文本输入或 `.txt` 文件上传
+- 文本输入或 TXT/Markdown/PDF/DOCX 文件上传
 - 主题色卡选择
 - MiniMax 音色下拉框
 - 字幕开关
@@ -402,6 +429,33 @@ FastAPI 后端和单页前端都在此文件中。
 ### `src/models.py`：共享数据协议
 
 所有处理模块都通过 `Course` 数据结构交换信息，避免模块间依赖临时字典。每完成一个阶段，模型都会序列化为 JSON，便于定位具体阶段的问题。
+
+### `src/documents.py`：多格式文档解析
+
+Web 和 CLI 入口统一通过该模块读取课程材料：
+
+- TXT：支持 UTF-8、UTF-8 BOM 和 GB18030 编码
+- Markdown：移除标题符号、引用符号、强调标记和链接地址，保留正文、列表、代码及链接文字
+- PDF：调用 MinerU 精准解析 API，使用 `vlm` 模型转换为 Markdown，再复用 Markdown 表格和正文解析
+- DOCX：按文档原始顺序提取段落、列表和表格
+
+上传文件最大为 25 MB。旧版 `.doc` 不直接支持，需要先在 Word 中另存为 `.docx`。PDF 默认开启 MinerU OCR、表格和公式识别，需要在 `.env` 配置 `MINERU_API_KEY`。
+
+### `src/mineru.py`：MinerU PDF 解析
+
+PDF 不再使用本地文本提取器直接读取，而是调用 MinerU 精准解析 API：
+
+1. 请求批量文件上传地址并取得 `batch_id`。
+2. 将本地 PDF 上传到 MinerU 返回的签名 URL。
+3. 按 `batch_id` 轮询 `waiting-file`、`pending`、`running`、`converting` 等状态。
+4. 任务完成后下载结果 ZIP。
+5. 优先读取 ZIP 中的 `full.md`。
+6. 将 MinerU 输出的 HTML 表格转换为标准 Markdown 表格。
+7. 把标准化文本交给现有 LLM、PPT 和视频流水线。
+
+解析过程在 Web 后台线程中执行，页面会显示上传、排队、解析页数和结果下载等进度，不会长时间阻塞创建任务的 HTTP 请求。
+
+项目已使用 9 页中文 PDF 进行真实 API 验证：正文、章节层级和公司对照表均可提取，未再出现本地 PDF 提取常见的中文逐字换行问题。
 
 ### `src/llm.py`：课程理解与文案处理
 
@@ -573,7 +627,7 @@ uvicorn app:app --reload --port 8000
 
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `file` | 文件 | 空 | UTF-8 `.txt` 文稿 |
+| `file` | 文件 | 空 | `.txt`、`.md`、`.markdown`、`.pdf` 或 `.docx`，最大 25 MB |
 | `text` | 字符串 | 空 | 直接粘贴的文稿 |
 | `subtitle` | 布尔 | `true` | 是否叠加字幕 |
 | `theme` | 字符串 | `apple` | 视觉主题 |
@@ -611,6 +665,36 @@ uvicorn app:app --reload --port 8000
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | API 地址 |
 | `OPENAI_MODEL` | `gpt-4o-mini` | 模型名 |
 
+### MinerU PDF 解析
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `MINERU_API_KEY` | 空 | MinerU API 管理页面创建的 Token |
+| `MINERU_BASE_URL` | `https://mineru.net` | MinerU API 根地址 |
+| `MINERU_MODEL` | `vlm` | 解析模型，推荐 `vlm`，也可使用 `pipeline` |
+| `MINERU_LANGUAGE` | `ch` | 文档主要语言 |
+| `MINERU_OCR` | `true` | 是否开启 OCR |
+| `MINERU_ENABLE_TABLE` | `true` | 是否识别表格 |
+| `MINERU_ENABLE_FORMULA` | `true` | 是否识别公式 |
+| `MINERU_TIMEOUT` | `900` | 整体解析超时秒数 |
+| `MINERU_POLL_INTERVAL` | `3` | 任务轮询间隔秒数 |
+| `MINERU_UPLOAD_TIMEOUT` | `180` | PDF 上传超时秒数 |
+| `MINERU_DOWNLOAD_TIMEOUT` | `180` | 结果 ZIP 下载超时秒数 |
+
+本地 PDF 调用链：
+
+```text
+申请签名上传地址
+  → PUT 上传 PDF
+  → MinerU 自动创建解析任务
+  → 按 batch_id 轮询解析状态
+  → 下载结果 ZIP
+  → 读取 full.md
+  → 进入现有 Markdown/LLM/课件/视频流水线
+```
+
+Token 可在 [MinerU API 管理页面](https://mineru.net/apiManage) 创建，接口参数与限制以 [MinerU API 文档](https://mineru.net/apiManage/docs) 为准。不要把 Token 提交到 GitHub。
+
 ### TTS
 
 | 变量 | 默认值 | 说明 |
@@ -637,6 +721,17 @@ uvicorn app:app --reload --port 8000
 ---
 
 ## 11. 中间产物与排错
+
+### PDF / MinerU 排错
+
+| 现象 | 检查项 |
+|---|---|
+| `未配置 MINERU_API_KEY` | 确认 `.env` 已填写 Token，并在修改后重启 Web 服务 |
+| MinerU API 连接失败 | 检查网络、Token、`MINERU_BASE_URL` 和 MinerU 服务状态 |
+| PDF 上传失败 | 检查文件是否损坏、是否超过 Web 的 25 MB 限制 |
+| MinerU 解析超时 | 适当增大 `MINERU_TIMEOUT`，并检查文档页数和复杂度 |
+| 表格没有进入 PPT | 先检查 `runs/<run_id>/00_input.txt` 中是否存在标准 Markdown 表格 |
+| 出现逐字换行 | 检查 MinerU 原始文档质量、OCR 语言和扫描清晰度 |
 
 ### `01_structure.json`
 
@@ -678,6 +773,8 @@ uvicorn app:app --reload --port 8000
 |---|---|
 | 未配置 LLM Key | 使用本地规则拆解 |
 | LLM 请求或 JSON 解析失败 | 使用本地规则拆解，并返回 warning |
+| 未配置 MinerU Token | PDF 任务明确报错，不使用低质量本地解析兜底 |
+| MinerU 返回 HTML 表格 | 自动转换为标准 Markdown 表格后进入拆课流程 |
 | 某页口播润色失败 | 保留该页原始讲解稿 |
 | PPTX 导出失败 | 记录错误，继续生成视频 |
 | MiniMax 未配置或失败 | 尝试 Edge TTS |
@@ -694,9 +791,10 @@ uvicorn app:app --reload --port 8000
 3. Web 使用本地线程执行任务，不适合直接承担大量并发生产任务。
 4. `settings.theme_name` 和 `settings.minimax_voice` 是进程级可变配置；并发任务选择不同主题或音色时可能互相影响。
 5. 生成过程中没有断点续跑；任务中断后需要重新执行或手工复用中间产物。
-6. 页面布局主要针对每页 2 到 4 条短要点，过多或过长文本可能超出画面。
+6. 要点页主要针对每页 3 到 6 条内容；极长文本、过多表格行或列仍可能超出画面。
 7. LLM 使用 Chat Completions 的 `response_format=json_object`，接入的兼容服务必须支持或正确忽略该参数。
 8. 规则兜底依赖文稿的段落结构，输入缺少空行时，页面拆分质量会下降。
+9. PDF 解析依赖 MinerU 在线 API；无网络、Token 失效或服务不可用时无法处理 PDF。
 
 ---
 
@@ -771,4 +869,3 @@ runs/
 4. 增加 Whisper 字幕对齐。
 5. 增加页面文本溢出检测。
 6. 增加中间阶段恢复和产物自动清理。
-

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from datetime import datetime
@@ -16,6 +17,7 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 
 from src import pipeline
 from src.config import settings, MINIMAX_VOICES, MINIMAX_VOICE_IDS, THEMES
+from src.documents import DocumentParseError, parse_document, supported_file_hint
 
 app = FastAPI(title="AI 课程视频生成系统")
 
@@ -26,7 +28,54 @@ RUNS.mkdir(exist_ok=True)
 JOBS: dict[str, dict] = {}
 
 
-def _worker(job_id: str, text: str, subtitle: bool, theme: str, voice: str):
+def _recover_completed_job(job_id: str, job: dict | None = None) -> dict | None:
+    """编码完成但清理临时文件报错时，从磁盘恢复任务结果。"""
+    run_dir = RUNS / job_id
+    video_path = run_dir / "output.mp4"
+    frames_path = run_dir / "04_with_frames.json"
+    if not video_path.is_file() or video_path.stat().st_size == 0 or not frames_path.is_file():
+        return None
+
+    try:
+        data = json.loads(frames_path.read_text(encoding="utf-8"))
+        slides = data.get("slides", [])
+        segments = [seg for slide in slides for seg in slide.get("segments", [])]
+        result = {
+            "video": str(video_path),
+            "pptx": str(run_dir / "course.pptx") if (run_dir / "course.pptx").is_file() else None,
+            "llm_used": None,
+            "warning": "视频已完成，已从编码后的磁盘产物恢复任务状态",
+            "course_title": data.get("title", "课程视频"),
+            "slides": len(slides),
+            "segments": len(segments),
+            "video_seconds": round(sum(float(seg.get("duration", 0)) for seg in segments), 1),
+            "elapsed_seconds": None,
+            "run_dir": str(run_dir),
+        }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+    recovered = job or {}
+    recovered.update(
+        status="done",
+        progress=1.0,
+        message="完成（已从磁盘恢复）",
+        result=result,
+    )
+    recovered.pop("error", None)
+    JOBS[job_id] = recovered
+    return recovered
+
+
+def _worker(
+    job_id: str,
+    text: str,
+    subtitle: bool,
+    theme: str,
+    voice: str,
+    upload_name: str | None = None,
+    upload_data: bytes | None = None,
+):
     job = JOBS[job_id]
     run_dir = RUNS / job_id
 
@@ -36,15 +85,28 @@ def _worker(job_id: str, text: str, subtitle: bool, theme: str, voice: str):
 
     try:
         job["status"] = "running"
-        result = pipeline.run(text, run_dir, progress_cb=cb, subtitle=subtitle, theme=theme, voice=voice)
+        content = text
+        progress_offset = 0.0
+        if upload_name is not None and upload_data is not None:
+            content = parse_document(upload_name, upload_data, progress_cb=cb)
+            progress_offset = 0.16 if Path(upload_name).suffix.lower() == ".pdf" else 0.02
+        result = pipeline.run(
+            content,
+            run_dir,
+            progress_cb=lambda p, m: cb(progress_offset + (1.0 - progress_offset) * p, m),
+            subtitle=subtitle,
+            theme=theme,
+            voice=voice,
+        )
         job["status"] = "done"
         job["result"] = result
         job["progress"] = 1.0
         job["message"] = "完成"
     except Exception as e:  # noqa: BLE001
-        job["status"] = "error"
-        job["error"] = str(e)
-        job["message"] = f"出错: {e}"
+        if not _recover_completed_job(job_id, job):
+            job["status"] = "error"
+            job["error"] = str(e)
+            job["message"] = f"出错: {e}"
 
 
 @app.post("/api/generate")
@@ -56,22 +118,38 @@ async def generate(
     voice: str = Form(default=""),
 ):
     content = text.strip()
+    upload_name = None
+    upload_data = None
     if file is not None:
-        content = (await file.read()).decode("utf-8", errors="ignore").strip()
-    if not content:
-        raise HTTPException(400, "请上传文案文件或粘贴文案内容")
+        upload_name = file.filename or ""
+        upload_data = await file.read()
+        suffix = Path(upload_name).suffix.lower()
+        if suffix not in {".txt", ".md", ".markdown", ".pdf", ".docx"}:
+            raise HTTPException(400, f"不支持 {suffix or '无扩展名'} 文件；当前支持 {supported_file_hint()}")
+        if not upload_data:
+            raise HTTPException(400, "上传文件为空")
+        if len(upload_data) > 25 * 1024 * 1024:
+            raise HTTPException(400, "文件超过 25 MB 上传限制")
+    if not content and upload_data is None:
+        raise HTTPException(400, f"请上传文案文件（{supported_file_hint()}）或粘贴文案内容")
 
     theme = theme if theme in THEMES else "apple"
     voice = voice if voice in MINIMAX_VOICE_IDS else settings.minimax_voice
     job_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
     JOBS[job_id] = {"progress": 0.0, "message": "排队中…", "status": "queued"}
-    threading.Thread(target=_worker, args=(job_id, content, subtitle, theme, voice), daemon=True).start()
+    threading.Thread(
+        target=_worker,
+        args=(job_id, content, subtitle, theme, voice, upload_name, upload_data),
+        daemon=True,
+    ).start()
     return {"job_id": job_id}
 
 
 @app.get("/api/status/{job_id}")
 async def status(job_id: str):
     job = JOBS.get(job_id)
+    if not job or job.get("status") == "error":
+        job = _recover_completed_job(job_id, job)
     if not job:
         raise HTTPException(404, "任务不存在")
     return JSONResponse(job)
@@ -80,6 +158,8 @@ async def status(job_id: str):
 @app.get("/api/video/{job_id}")
 async def video(job_id: str):
     job = JOBS.get(job_id)
+    if not job or job.get("status") == "error":
+        job = _recover_completed_job(job_id, job)
     if not job or job.get("status") != "done":
         raise HTTPException(404, "视频尚未就绪")
     path = Path(job["result"]["video"])
@@ -91,6 +171,8 @@ async def video(job_id: str):
 @app.get("/api/pptx/{job_id}")
 async def pptx(job_id: str):
     job = JOBS.get(job_id)
+    if not job or job.get("status") == "error":
+        job = _recover_completed_job(job_id, job)
     if not job or job.get("status") != "done":
         raise HTTPException(404, "PPT 尚未就绪")
     p = job["result"].get("pptx")
@@ -159,7 +241,13 @@ HTML = """<!doctype html>
   .file-row{display:flex;align-items:center;gap:12px;}
   .file-btn{font-size:14px;color:var(--blue);cursor:pointer;font-weight:500;}
   input[type=file]{display:none;}
-  .fname{font-size:13px;color:var(--muted);}
+  .file-status{display:flex;align-items:center;gap:12px;margin-top:12px;padding:13px 15px;border:1px solid var(--line);border-radius:12px;background:#f5f5f7;color:var(--muted);transition:.2s;}
+  .file-status.selected{border-color:#8bd49d;background:#f0fbf3;color:#176c2f;box-shadow:0 0 0 3px rgba(52,199,89,.09);}
+  .file-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:#e5e5ea;color:var(--muted);font-size:15px;font-weight:700;flex:0 0 auto;}
+  .file-status.selected .file-icon{background:#34c759;color:#fff;}
+  .file-info{min-width:0;}
+  .fname{display:block;font-size:14px;font-weight:600;color:inherit;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .fmeta{display:block;font-size:12px;color:var(--muted);margin-top:2px;}
   /* 主题选择：可换行的色卡 chips */
   .chips{display:flex;flex-wrap:wrap;gap:10px;}
   .chip{display:inline-flex;align-items:center;border:1px solid var(--line);background:#fff;color:var(--ink);font-size:14px;font-weight:500;padding:9px 16px;border-radius:980px;cursor:pointer;transition:.15s;font-family:inherit;}
@@ -211,14 +299,21 @@ HTML = """<!doctype html>
 
   <div class="card">
     <div class="label">上课文案</div>
-    <textarea id="text" placeholder="在此粘贴上课文案，或选择 .txt 文件…"></textarea>
+    <textarea id="text" placeholder="在此粘贴上课文案，或上传 TXT、Markdown、PDF、Word 文档…"></textarea>
 
     <div class="field">
       <div class="file-row">
         <label class="file-btn" for="file">＋ 选择文件</label>
-        <input type="file" id="file" accept=".txt"/>
-        <span class="fname" id="fname">未选择文件</span>
+        <input type="file" id="file" accept=".txt,.md,.markdown,.pdf,.docx,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"/>
       </div>
+      <div class="file-status" id="file-status">
+        <span class="file-icon" id="file-icon">＋</span>
+        <span class="file-info">
+          <span class="fname" id="fname">尚未选择文件</span>
+          <span class="fmeta" id="fmeta">支持 TXT、Markdown、PDF、Word</span>
+        </span>
+      </div>
+      <div class="label" style="margin-top:9px;font-weight:400;">支持 .txt、.md、.markdown、.pdf、.docx，最大 25 MB；PDF 将通过 MinerU 解析</div>
     </div>
 
     <div class="field">
@@ -264,6 +359,7 @@ const $ = id => document.getElementById(id);
 let timer = null;
 const activeChip = document.querySelector("#seg .chip.active") || document.querySelector("#seg .chip");
 let theme = activeChip ? activeChip.dataset.theme : "apple";
+const resumeJob = new URLSearchParams(window.location.search).get("job");
 
 document.querySelectorAll("#seg .chip").forEach(b => {
   b.onclick = () => {
@@ -274,7 +370,22 @@ document.querySelectorAll("#seg .chip").forEach(b => {
 });
 
 $("file").onchange = () => {
-  $("fname").textContent = $("file").files[0] ? $("file").files[0].name : "未选择文件";
+  const file = $("file").files[0];
+  if(file){
+    const ext = file.name.includes(".") ? file.name.split(".").pop().toUpperCase() : "文件";
+    const size = file.size < 1024*1024
+      ? (file.size/1024).toFixed(1) + " KB"
+      : (file.size/1024/1024).toFixed(2) + " MB";
+    $("file-status").classList.add("selected");
+    $("file-icon").textContent = "✓";
+    $("fname").textContent = file.name;
+    $("fmeta").textContent = `${ext} · ${size} · 已选择，生成时将优先使用此文件`;
+  } else {
+    $("file-status").classList.remove("selected");
+    $("file-icon").textContent = "＋";
+    $("fname").textContent = "尚未选择文件";
+    $("fmeta").textContent = "支持 TXT、Markdown、PDF、Word";
+  }
 };
 
 $("go").onclick = async () => {
@@ -337,7 +448,13 @@ function showResult(job_id, res){
   $("stats").innerHTML = `
     <div class="stat"><b>${res.slides}</b><span>页 PPT</span></div>
     <div class="stat"><b>${res.video_seconds}s</b><span>视频时长</span></div>
-    <div class="stat"><b>${res.elapsed_seconds}s</b><span>生成耗时</span></div>`;
+    <div class="stat"><b>${res.elapsed_seconds == null ? "—" : res.elapsed_seconds + "s"}</b><span>生成耗时</span></div>`;
+}
+
+if(resumeJob){
+  $("prog-card").classList.remove("hidden");
+  setBar(0.98, "正在恢复已完成任务…");
+  poll(resumeJob);
 }
 </script>
 </body>

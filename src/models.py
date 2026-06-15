@@ -44,6 +44,9 @@ class Slide:
     """一页 PPT。"""
     title: str
     bullets: List[str] = field(default_factory=list)
+    layout: str = "bullets"  # bullets / table
+    table_headers: List[str] = field(default_factory=list)
+    table_rows: List[List[str]] = field(default_factory=list)
     segments: List[Segment] = field(default_factory=list)
     index: int = 0
     kind: str = "content"  # cover / content / summary
@@ -80,6 +83,9 @@ class Course:
                 Slide(
                     title=s["title"],
                     bullets=list(s.get("bullets", [])),
+                    layout=s.get("layout", "table" if s.get("table_rows") else "bullets"),
+                    table_headers=list(s.get("table_headers", [])),
+                    table_rows=[list(row) for row in s.get("table_rows", [])],
                     segments=segs,
                     index=s.get("index", i),
                     kind=s.get("kind", "content"),

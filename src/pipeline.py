@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -38,12 +39,27 @@ def run(
     (run_dir / "audio").mkdir(parents=True, exist_ok=True)
 
     t0 = time.time()
+    # 保存实际送入课程拆解的标准化文本，便于定位 PDF/Word 解析质量。
+    (run_dir / "00_input.txt").write_text(input_text, encoding="utf-8")
 
     # 1) 结构化
     cb(0.05, "LLM 拆解课程结构…")
     course = llm.structure_course(input_text)
     llm_used = llm.LAST_STATUS["llm"]
     warning = llm.LAST_STATUS["note"]
+    (run_dir / "00_status.json").write_text(
+        json.dumps(
+            {
+                "llm_used": llm_used,
+                "llm_note": warning,
+                "theme": settings.theme_name,
+                "voice": settings.minimax_voice,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     if warning:
         cb(0.06, "⚠ " + warning)
     course.to_json(run_dir / "01_structure.json")

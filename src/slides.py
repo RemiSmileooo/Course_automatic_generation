@@ -39,22 +39,24 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
 
 def _tokenize(text: str) -> List[str]:
     """切分为换行单元：英文/数字串作为整体（不拆词），中文逐字，空白单独成元。"""
-    return re.findall(r"[A-Za-z0-9][A-Za-z0-9\-_.+#]*|\s+|[^\sA-Za-z0-9]", text)
+    return re.findall(r"[A-Za-z0-9][A-Za-z0-9\-_.+#]*|[^\S\r\n]+|[^\sA-Za-z0-9]", text)
 
 
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> List[str]:
-    """按宽度换行，兼容中英文：中文逐字，英文/数字按整词不拆。"""
+    """按宽度换行；保留显式换行，但不把多行文本传给 textlength。"""
     lines: List[str] = []
-    line = ""
-    for tok in _tokenize(text):
-        candidate = line + tok
-        if line and draw.textlength(candidate, font=font) > max_width:
+    paragraphs = re.split(r"\r\n|\r|\n", str(text))
+    for paragraph in paragraphs:
+        line = ""
+        for tok in _tokenize(paragraph):
+            candidate = line + tok
+            if line and draw.textlength(candidate, font=font) > max_width:
+                lines.append(line.rstrip())
+                line = "" if tok.isspace() else tok
+            else:
+                line = candidate
+        if line.strip():
             lines.append(line.rstrip())
-            line = "" if tok.isspace() else tok
-        else:
-            line = candidate
-    if line.strip():
-        lines.append(line.rstrip())
     return lines or [""]
 
 
@@ -108,7 +110,8 @@ def _draw_page_body(img: Image.Image, slide: Slide) -> _Layout:
 
     # 标题（自动缩放，保证单行不溢出）
     title_w = w - 2 * margin
-    t_font, t_lines = _fit_font(draw, slide.title, title_w, int(h * 0.062), True, int(h * 0.042), max_lines=1)
+    title_text = re.sub(r"\s+", " ", slide.title).strip()
+    t_font, t_lines = _fit_font(draw, title_text, title_w, int(h * 0.062), True, int(h * 0.042), max_lines=1)
     draw.text((margin, int(h * 0.08)), t_lines[0], font=t_font, fill=th.title)
     # 标题下强调短线
     underline_y = int(h * 0.08) + t_font.getbbox("国")[3] + 18
@@ -117,8 +120,13 @@ def _draw_page_body(img: Image.Image, slide: Slide) -> _Layout:
         radius=4, fill=th.accent,
     )
 
+    if slide.layout == "table" and slide.table_rows:
+        return _draw_table_body(img, slide, margin, underline_y)
+
     # 要点区
-    b_font = _font(int(h * 0.040))
+    bullet_count = max(1, len(slide.bullets))
+    bullet_size = int(h * (0.040 if bullet_count <= 4 else 0.033))
+    b_font = _font(bullet_size)
     content_x = margin + 56
     content_w = w - margin - content_x - int(w * 0.04)
     y = int(h * 0.26)
@@ -150,6 +158,67 @@ def _draw_page_body(img: Image.Image, slide: Slide) -> _Layout:
     return _Layout(bullet_boxes=boxes)
 
 
+def _draw_table_body(img: Image.Image, slide: Slide, margin: int, underline_y: int) -> _Layout:
+    w, h = img.size
+    th = settings.theme
+    draw = ImageDraw.Draw(img)
+    headers = slide.table_headers or [f"列 {i + 1}" for i in range(max(len(r) for r in slide.table_rows))]
+    col_count = max(1, len(headers), *(len(row) for row in slide.table_rows))
+    rows = [row + [""] * (col_count - len(row)) for row in slide.table_rows]
+    headers = headers + [""] * (col_count - len(headers))
+
+    left, right = margin, w - margin
+    top = max(int(h * 0.21), underline_y + 35)
+    bottom = int(h * 0.86)
+    table_w = right - left
+    table_h = bottom - top
+    header_h = max(58, int(table_h * 0.13))
+    row_h = max(58, (table_h - header_h) // max(1, len(rows)))
+
+    if col_count == 2:
+        widths = [int(table_w * 0.30), table_w - int(table_w * 0.30)]
+    else:
+        widths = [table_w // col_count] * col_count
+        widths[-1] += table_w - sum(widths)
+
+    header_font = _font(max(22, int(h * 0.030)), bold=True)
+    body_font = _font(max(18, int(h * (0.027 if len(rows) <= 6 else 0.022))))
+    x = left
+    for ci, header in enumerate(headers):
+        cw = widths[ci]
+        draw.rectangle([x, top, x + cw, top + header_h], fill=th.accent)
+        header_lines = _wrap(draw, header, header_font, cw - 24)[:2]
+        line_h = header_font.getbbox("国")[3] + 5
+        ty = top + max(8, (header_h - line_h * len(header_lines)) // 2)
+        for line in header_lines:
+            tw = draw.textlength(line, font=header_font)
+            draw.text((x + max(12, (cw - tw) / 2), ty), line, font=header_font, fill=(255, 255, 255))
+            ty += line_h
+        x += cw
+
+    boxes: List[Tuple[int, int, int, int]] = []
+    for ri, row in enumerate(rows):
+        y = top + header_h + ri * row_h
+        fill = tuple(min(255, c + (10 if ri % 2 == 0 else 18)) for c in th.bg_top)
+        draw.rectangle([left, y, right, y + row_h], fill=fill, outline=th.bullet, width=1)
+        boxes.append((left, y, table_w, row_h))
+        x = left
+        for ci, cell in enumerate(row):
+            cw = widths[ci]
+            if ci:
+                draw.line([(x, y), (x, y + row_h)], fill=th.bullet, width=1)
+            lines = _wrap(draw, cell, body_font, cw - 24)
+            max_lines = max(1, (row_h - 16) // max(1, body_font.getbbox("国")[3] + 5))
+            lines = lines[:max_lines]
+            line_h = body_font.getbbox("国")[3] + 5
+            ty = y + max(8, (row_h - line_h * len(lines)) // 2)
+            for line in lines:
+                draw.text((x + 12, ty), line, font=body_font, fill=th.text)
+                ty += line_h
+            x += cw
+    return _Layout(bullet_boxes=boxes)
+
+
 def _draw_cover(img: Image.Image, slide: Slide, margin: int) -> _Layout:
     w, h = img.size
     th = settings.theme
@@ -158,9 +227,10 @@ def _draw_cover(img: Image.Image, slide: Slide, margin: int) -> _Layout:
 
     # 标题自动缩放：优先单行（缩小到 0.058h 仍放不下才允许两行），英文整词不拆
     title_w = w - 2 * margin
-    title_font, lines = _fit_font(draw, slide.title, title_w, int(h * 0.085), True, int(h * 0.058), max_lines=1)
+    title_text = re.sub(r"\s+", " ", slide.title).strip()
+    title_font, lines = _fit_font(draw, title_text, title_w, int(h * 0.085), True, int(h * 0.058), max_lines=1)
     if len(lines) > 1:  # 单行实在放不下，退回较大字号的两行排版
-        title_font, lines = _fit_font(draw, slide.title, title_w, int(h * 0.085), True, int(h * 0.060), max_lines=2)
+        title_font, lines = _fit_font(draw, title_text, title_w, int(h * 0.085), True, int(h * 0.060), max_lines=2)
     line_h = title_font.getbbox("国")[3] + 24
     total_h = line_h * len(lines)
     y = (h - total_h) // 2 - 40
@@ -175,8 +245,13 @@ def _draw_cover(img: Image.Image, slide: Slide, margin: int) -> _Layout:
 
     subtitle = (slide.bullets[0] if slide.bullets else "") or ""
     if subtitle:
-        sw = draw.textlength(subtitle, font=sub_font)
-        draw.text(((w - sw) / 2, y + 50), subtitle, font=sub_font, fill=th.text)
+        subtitle_lines = _wrap(draw, subtitle, sub_font, w - 2 * margin)[:2]
+        sy = y + 50
+        sub_line_h = sub_font.getbbox("国")[3] + 12
+        for subtitle_line in subtitle_lines:
+            sw = draw.textlength(subtitle_line, font=sub_font)
+            draw.text(((w - sw) / 2, sy), subtitle_line, font=sub_font, fill=th.text)
+            sy += sub_line_h
     return _Layout(bullet_boxes=[])
 
 
@@ -294,7 +369,7 @@ def render_slide_frames(slide: Slide, out_dir: str | Path, subtitle: bool = True
     for si, seg in enumerate(slide.segments):
         # 带高亮的页面底图（同一片段内所有字幕共用）
         seg_base = base.copy()
-        if seg.kind == "bullet" and 0 <= seg.bullet_index < len(layout.bullet_boxes):
+        if seg.kind in {"bullet", "table"} and 0 <= seg.bullet_index < len(layout.bullet_boxes):
             _draw_highlight(seg_base, layout.bullet_boxes[seg.bullet_index])
 
         # 把整段口播稿切成多条字幕，逐条渲染一帧

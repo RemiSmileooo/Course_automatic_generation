@@ -23,9 +23,15 @@ LAST_STATUS = {"llm": False, "note": ""}
 # OpenAI 客户端（惰性创建）
 # --------------------------------------------------------------------------- #
 def _client():
+    import httpx
     from openai import OpenAI
 
-    return OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    # 某些运行环境会注入不可用的 HTTP(S)_PROXY，导致本可直连的 API 请求失败。
+    return OpenAI(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        http_client=httpx.Client(trust_env=False),
+    )
 
 
 def _chat_json(system: str, user: str) -> dict:
@@ -47,29 +53,31 @@ def _chat_json(system: str, user: str) -> dict:
 # --------------------------------------------------------------------------- #
 # 阶段 1：结构化拆解
 # --------------------------------------------------------------------------- #
-_STRUCTURE_SYSTEM = """你是一名资深课程设计师，擅长把一篇上课文案拆解成结构清晰、适合 PPT 展示的课件。
+_STRUCTURE_SYSTEM = """你是一名资深课程设计师和信息可视化设计师，擅长把长篇上课文案设计成内容完整、版式多样的课件。
 请严格输出 JSON，不要包含任何多余文字。"""
 
 _STRUCTURE_USER_TMPL = """请把下面这篇上课文案拆解成一套课程 PPT 结构。
 
 要求：
 1. 提炼课程标题(title)与副标题(subtitle)。
-2. 生成 6~10 页幻灯片(slides)。第一页 kind 为 "cover"(封面)，最后一页 kind 为 "summary"(总结)，中间为 "content"。
-3. 每页(除封面外)给出：
-   - title: 简洁的页面标题(不超过 16 字)
-   - bullets: 2~4 条要点，每条精炼短句(不超过 22 字)，是这一页 PPT 上真正展示的文字
-   - intro_script: 进入这一页时的一句过渡讲解(口语、自然)
-   - bullet_scripts: 与 bullets 一一对应的讲解稿，每条 1~3 句，把该要点讲透
-4. 封面页 bullets 可为空，intro_script 为课程开场白，bullet_scripts 为空数组。
-5. 讲解稿要口语化、有讲课感，不要照抄要点文字。
+2. 根据原文长度生成 8~20 页；长文（约 6000 字以上或包含 8 个以上一级章节）应生成 14~20 页。原文每个一级编号章节都必须至少有一页，重要章节可拆成两页。第一页 kind 为 "cover"，最后一页 kind 为 "summary"。
+3. 不得把多个无关章节压缩到同一页。必须覆盖原文中的主要公司、部门类型、排序、案例和结论；宁可增加页数，不要为了页数限制丢内容。
+4. 页面支持两种 layout：
+   - "bullets"：3~6 条信息完整的要点，每条通常 18~45 字，不要固定成三条，也不要只写几个词。
+   - "table"：原文包含公司对比、分类矩阵、排名或表格时使用。给出 table_headers、table_rows，并完整保留原表的重要行列；表格页 bullets 为空。
+5. bullets 页面给出 bullet_scripts，与 bullets 一一对应；table 页面给出 table_row_scripts，与 table_rows 一一对应，逐行解释表格内容。
+6. title 不超过 22 字；intro_script 是进入该页的一句自然过渡。
+7. 封面页 bullets、table_headers、table_rows 均为空。
+8. 讲解稿要口语化、有讲课感，同时保留原文的事实、公司名称、岗位名称和关键数字，不要泛化成空洞总结。
 
 只输出如下 JSON 结构：
 {
   "title": "...",
   "subtitle": "...",
   "slides": [
-    {"kind":"cover","title":"...","bullets":[],"intro_script":"...","bullet_scripts":[]},
-    {"kind":"content","title":"...","bullets":["...","..."],"intro_script":"...","bullet_scripts":["...","..."]}
+    {"kind":"cover","layout":"bullets","title":"...","bullets":[],"table_headers":[],"table_rows":[],"intro_script":"...","bullet_scripts":[],"table_row_scripts":[]},
+    {"kind":"content","layout":"bullets","title":"...","bullets":["...","..."],"table_headers":[],"table_rows":[],"intro_script":"...","bullet_scripts":["...","..."],"table_row_scripts":[]},
+    {"kind":"content","layout":"table","title":"...","bullets":[],"table_headers":["公司类型","最核心部门"],"table_rows":[["Google / Meta / TikTok","Ads、Ranking、Feed/Search、Growth、AI Infra"]],"intro_script":"...","bullet_scripts":[],"table_row_scripts":["逐行讲解..."]}
   ]
 }
 
@@ -100,7 +108,15 @@ def _course_from_struct(data: dict) -> Course:
     course = Course(title=data.get("title", "课程讲解"), subtitle=data.get("subtitle", ""))
     for i, s in enumerate(data.get("slides", [])):
         bullets = list(s.get("bullets", []) or [])
+        table_headers = [str(x).strip() for x in (s.get("table_headers", []) or [])]
+        table_rows = [
+            [str(cell).strip() for cell in row]
+            for row in (s.get("table_rows", []) or [])
+            if isinstance(row, list)
+        ]
+        layout = s.get("layout", "table" if table_rows else "bullets")
         bullet_scripts = list(s.get("bullet_scripts", []) or [])
+        table_row_scripts = list(s.get("table_row_scripts", []) or [])
         # 对齐长度，避免越界
         while len(bullet_scripts) < len(bullets):
             bullet_scripts.append(bullets[len(bullet_scripts)])
@@ -110,10 +126,17 @@ def _course_from_struct(data: dict) -> Course:
             segments.append(Segment(kind="intro", script=intro))
         for bi, bs in enumerate(bullet_scripts[: len(bullets)]):
             segments.append(Segment(kind="bullet", script=bs.strip(), bullet_index=bi))
+        while len(table_row_scripts) < len(table_rows):
+            table_row_scripts.append("；".join(table_rows[len(table_row_scripts)]))
+        for ri, script in enumerate(table_row_scripts[: len(table_rows)]):
+            segments.append(Segment(kind="table", script=str(script).strip(), bullet_index=ri))
         course.slides.append(
             Slide(
                 title=s.get("title", course.title if i == 0 else f"第 {i} 节"),
                 bullets=bullets,
+                layout=layout,
+                table_headers=table_headers,
+                table_rows=table_rows,
                 segments=segments,
                 index=i,
                 kind=s.get("kind", "cover" if i == 0 else "content"),

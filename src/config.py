@@ -144,6 +144,19 @@ class Settings:
     openai_base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 
+    # ---- MinerU PDF 解析 ----
+    mineru_api_key: str = field(default_factory=lambda: os.getenv("MINERU_API_KEY", ""))
+    mineru_base_url: str = field(default_factory=lambda: os.getenv("MINERU_BASE_URL", "https://mineru.net").rstrip("/"))
+    mineru_model: str = field(default_factory=lambda: os.getenv("MINERU_MODEL", "vlm"))
+    mineru_language: str = field(default_factory=lambda: os.getenv("MINERU_LANGUAGE", "ch"))
+    mineru_ocr: bool = field(default_factory=lambda: os.getenv("MINERU_OCR", "true").lower() in {"1", "true", "yes", "on"})
+    mineru_enable_table: bool = field(default_factory=lambda: os.getenv("MINERU_ENABLE_TABLE", "true").lower() in {"1", "true", "yes", "on"})
+    mineru_enable_formula: bool = field(default_factory=lambda: os.getenv("MINERU_ENABLE_FORMULA", "true").lower() in {"1", "true", "yes", "on"})
+    mineru_timeout: int = field(default_factory=lambda: int(os.getenv("MINERU_TIMEOUT", "900")))
+    mineru_poll_interval: float = field(default_factory=lambda: float(os.getenv("MINERU_POLL_INTERVAL", "3")))
+    mineru_upload_timeout: int = field(default_factory=lambda: int(os.getenv("MINERU_UPLOAD_TIMEOUT", "180")))
+    mineru_download_timeout: int = field(default_factory=lambda: int(os.getenv("MINERU_DOWNLOAD_TIMEOUT", "180")))
+
     # ---- TTS ----
     tts_provider: str = field(default_factory=lambda: os.getenv("TTS_PROVIDER", "minimax").lower())
     minimax_api_key: str = field(default_factory=lambda: os.getenv("MINIMAX_API_KEY", ""))

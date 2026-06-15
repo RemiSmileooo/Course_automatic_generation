@@ -16,6 +16,9 @@ import requests
 
 from .config import settings
 
+_http = requests.Session()
+_http.trust_env = False
+
 
 def synthesize(text: str, out_path: str | Path) -> tuple[str, float]:
     """合成一段音频，返回 (实际文件路径, 时长秒)。"""
@@ -80,7 +83,7 @@ def _minimax(text: str, out_path: Path) -> tuple[str, float]:
     max_retries = 6
     data = {}
     for attempt in range(max_retries):
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r = _http.post(url, headers=headers, json=payload, timeout=60)
         r.raise_for_status()
         data = r.json()
         code = data.get("base_resp", {}).get("status_code", 0)
