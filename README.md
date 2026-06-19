@@ -26,8 +26,8 @@
 ## 快速开始
 
 ```powershell
-git clone https://github.com/RemiSmileooo/AI_tutor_video_generate.git
-cd AI_tutor_video_generate
+git clone https://github.com/RemiSmileooo/Course_automatic_generation.git
+cd Course_automatic_generation
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt

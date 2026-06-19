@@ -53,6 +53,19 @@ def test_create_returns_none_when_llm_unavailable(monkeypatch):
     assert design_session.create_session("x") is None
 
 
+def test_create_session_from_html(monkeypatch):
+    monkeypatch.setattr(llm_slide, "import_course_html", lambda html, text="": _fake_course())
+    sess = design_session.create_session_from_html("<section class='slide'>x</section>", "文案")
+    assert sess is not None
+    assert len(sess.slides) == 2
+    assert "导入" in sess.history[0]["content"]
+
+
+def test_create_from_html_none_when_import_fails(monkeypatch):
+    monkeypatch.setattr(llm_slide, "import_course_html", lambda html, text="": None)
+    assert design_session.create_session_from_html("<bad", "") is None
+
+
 def test_revise_success_updates(monkeypatch):
     monkeypatch.setattr(llm_slide, "generate_course_html", lambda text: _fake_course())
     sess = design_session.create_session("文案")

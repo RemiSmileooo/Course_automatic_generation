@@ -16,7 +16,7 @@ import html as _html
 from .config import settings
 
 # 设计系统版本：变更时使 LLM 结果缓存失效
-DESIGN_SYSTEM_VERSION = "5"
+DESIGN_SYSTEM_VERSION = "7"
 
 # 底部字幕安全区高度（px）。LLM 内容层不得占用该区域。
 CAPTION_SAFE_ZONE = 150
@@ -48,6 +48,10 @@ def base_css() -> str:
     .slide{{position:relative;width:{w}px;height:{h}px;overflow:hidden;
       display:flex;flex-direction:column;justify-content:center;
       padding:72px 88px calc(var(--safe) + 24px);}}
+    /* 兜底：单一主容器时撑满剩余高度，避免内容塌缩在顶部。
+       注意：不要给所有子元素强制 width:100%，否则会把绝对定位的页码等撑满导致错位；
+       .slide 是 flex 列布局，普通子元素默认已 stretch 满宽。 */
+    .slide > *:only-child{{flex:1 1 auto;min-height:0;}}
     /* 文字层级 */
     .kicker{{font-size:18px;letter-spacing:.18em;font-weight:800;color:var(--accent);text-transform:uppercase;margin-bottom:14px;}}
     h1{{font-size:78px;line-height:1.08;font-weight:850;letter-spacing:-.03em;color:var(--title);}}
@@ -140,6 +144,10 @@ def design_spec_for_prompt() -> str:
 4. 底部预留约 {CAPTION_SAFE_ZONE}px 字幕安全区，不要在最底部放内容（字幕由系统另行叠加，你不要写字幕/讲稿到页面上）。
 5. 安全：禁止 <script>、禁止任何 http(s) 外链/外部图片/外部字体、禁止 position:fixed。
 6. 内容忠实于给定文案，不要臆造文案中没有的事实或数据。
+7. 【撑满画布·重要】页面主体必须填满整个 {w}×{h} 画布，不能让内容塌缩在顶部或挤在一角。
+   - 你的根布局容器（如分栏 grid、flex 容器）要显式设 height:100%（或用 flex 占满），让左右栏、各区块在垂直方向铺满整页。
+   - 例：若用 <section class="slide"> 下再包一个 .layout 做分栏，请给 .layout 设 height:100%；分栏两侧 padding 充足、内容垂直居中。
+   - 留出底部约 {CAPTION_SAFE_ZONE} px 字幕安全区即可，其余空间应被合理利用，不要大片空白。
 
 【设计自由】
 - 配色、布局、版式、排版风格【完全由你决定】，怎么好看怎么来，每页都可以不一样。

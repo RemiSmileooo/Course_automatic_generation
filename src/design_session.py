@@ -41,14 +41,27 @@ def create_session(text: str) -> Optional[DesignSession]:
     course = llm_slide.generate_course_html(text)
     if course is None:
         return None
+    return _session_from_course(course, source_text=text, note="初始设计已生成")
+
+
+def create_session_from_html(html: str, text: str = "") -> Optional[DesignSession]:
+    """导入用户自带 HTML（+可选文案）适配成会话。失败返回 None。"""
+    course = llm_slide.import_course_html(html, text)
+    if course is None:
+        return None
+    return _session_from_course(course, source_text=text or "（导入 HTML，无文案）",
+                                note="已导入并适配上传的 HTML")
+
+
+def _session_from_course(course, source_text: str, note: str) -> DesignSession:
     payload = llm_slide.course_to_payload(course)
     sid = uuid.uuid4().hex[:12]
     sess = DesignSession(
         sid=sid,
-        source_text=text,
+        source_text=source_text,
         title=payload.get("title", "课程讲解"),
         slides=payload.get("slides", []),
-        history=[{"role": "system", "content": "初始设计已生成"}],
+        history=[{"role": "system", "content": note}],
     )
     _save(sess)
     return sess

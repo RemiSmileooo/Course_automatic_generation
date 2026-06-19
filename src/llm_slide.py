@@ -109,7 +109,79 @@ def generate_course_html(text: str, use_cache: bool = True) -> Optional[Course]:
 
 
 # --------------------------------------------------------------------------- #
-# 修改设计（对话式）
+# 导入适配：用户自带 HTML + 文案 → 适配成系统结构（切分/补高亮/分段口播/最小改动）
+# --------------------------------------------------------------------------- #
+_IMPORT_SYSTEM = (
+    "你是一名资深课程 PPT 工程师。用户提供了一份已经设计好的 HTML 课件，以及配套课程文案。"
+    "你的任务不是重新设计，而是把这份 HTML 适配进课程视频生产管线：切分成逐页、为每页补充逐要点高亮标记与样式、"
+    "并依据文案为每页生成分段口播稿。尽量保留原设计，只做最小必要改动。严格输出 JSON，不要多余文字。"
+)
+
+
+def import_course_html(html: str, text: str = "", use_cache: bool = True) -> Optional[Course]:
+    """把用户上传的 HTML（+可选文案）适配成 Course。失败返回 None。"""
+    LAST_STATUS.update(llm=False, note="", cached=False)
+    if not settings.llm_available():
+        LAST_STATUS["note"] = "未配置 OPENAI_API_KEY"
+        return None
+
+    key = _cache_key("IMPORT::" + html + "::" + (text or ""))
+    if use_cache:
+        cached = _cache_get(key)
+        if cached is not None:
+            course = _course_from_payload(cached)
+            if course:
+                LAST_STATUS.update(llm=True, cached=True, note="命中缓存")
+                return course
+
+    payload, last_err = None, ""
+    for _ in range(2):
+        try:
+            raw = _chat(_IMPORT_SYSTEM, _import_prompt(html, text))
+            payload = _parse_payload(raw)
+            if payload and payload.get("slides"):
+                break
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e); payload = None
+    if not payload or not payload.get("slides"):
+        LAST_STATUS["note"] = f"导入适配失败：{last_err or '空结果'}"
+        return None
+
+    course = _course_from_payload(payload)
+    if not course or not course.slides:
+        LAST_STATUS["note"] = "导入解析为空"
+        return None
+    if use_cache:
+        _cache_put(key, payload)
+    LAST_STATUS.update(llm=True, cached=False, note="")
+    return course
+
+
+def _import_prompt(html: str, text: str) -> str:
+    w, h = settings.width, settings.height
+    text_block = (
+        f"\n【配套课程文案（用于改写每页口播稿，使讲解自然、与画面一致）】\n\"\"\"\n{text.strip()}\n\"\"\"\n"
+        if text.strip() else "\n（用户未提供文案，请依据 HTML 内容自行撰写自然口播稿。）\n"
+    )
+    return f"""请把下面这份"已设计好的 HTML 课件"适配进课程视频生产管线。
+
+{slide_design.design_spec_for_prompt()}
+
+【适配任务（尽量保留原设计，只做最小必要改动）】
+1. 切分：把整份 HTML 按页切成多页（原稿常用 “NN / 总数” 之类页脚或多个区块分页）。每页输出一个 <section class="slide">…</section> 的 base HTML。
+   - 尽量保留原有文字、结构、视觉风格，不要重写设计。
+2. 尺寸适配（仅在不合规时改）：目标画布 {w}×{h}px。若原稿字号过小/使用 rem/em/百分比/未留底部字幕区，则改为 px 并适配到该画布、底部留约 {slide_design.CAPTION_SAFE_ZONE}px 字幕安全区；若已合适则不动。
+3. 补高亮：为每页"可被逐个讲到"的要点/卡片/区块加 data-hl="1"、"2"…（按讲解顺序），并在该页内补一个 <style> 定义 .hl-on（被讲到时强调）与 .hl-dim（其余弱化）。base 状态不要预先加这两个 class。
+4. 分段口播 steps：依据文案与该页内容，为每页生成 steps 数组，每个 {{"focus":数字,"narration":"口播稿"}}：focus=0 为开场/过渡，focus=N 高亮 data-hl="N"。讲稿自然口语、忠实内容，不臆造。
+5. 不要在页面里写字幕/讲稿文字；不要 <script>/外链。
+
+【只输出如下 JSON】
+{{"title":"课程标题","slides":[{{"kind":"cover|content|summary","html":"<section class=\\"slide\\">…</section>","steps":[{{"focus":0,"narration":"…"}}]}}]}}
+
+【已设计好的 HTML】
+\"\"\"
+{html.strip()}
+\"\"\"{text_block}"""
 # --------------------------------------------------------------------------- #
 _REVISE_SYSTEM = (
     "你是一名资深课程 PPT 设计师。用户会给你当前整套幻灯片的设计(JSON)，以及一句修改要求。"

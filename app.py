@@ -213,8 +213,16 @@ def _design_produce_worker(job_id: str, sid: str, subtitle: bool, voice: str):
 
 
 @app.post("/api/design")
-async def design_create(text: str = Form(default=""), file: UploadFile | None = File(default=None)):
+async def design_create(
+    text: str = Form(default=""),
+    html: str = Form(default=""),
+    file: UploadFile | None = File(default=None),
+    html_file: UploadFile | None = File(default=None),
+):
     content = text.strip()
+    html_src = html.strip()
+
+    # 文案文件（txt/md/pdf/docx）
     if file is not None:
         name = file.filename or ""
         data = await file.read()
@@ -222,18 +230,41 @@ async def design_create(text: str = Form(default=""), file: UploadFile | None = 
         if suffix not in {".txt", ".md", ".markdown", ".pdf", ".docx"}:
             raise HTTPException(400, f"不支持 {suffix or '无扩展名'} 文件；当前支持 {supported_file_hint()}")
         if not data:
-            raise HTTPException(400, "上传文件为空")
+            raise HTTPException(400, "上传文案文件为空")
         if len(data) > 25 * 1024 * 1024:
             raise HTTPException(400, "文件超过 25 MB 上传限制")
         content = parse_document(name, data)
-    if not content:
-        raise HTTPException(400, f"请粘贴文案或上传文件（{supported_file_hint()}）")
+
+    # HTML 文件（.html/.htm）
+    if html_file is not None:
+        hname = html_file.filename or ""
+        hsuf = Path(hname).suffix.lower()
+        if hsuf not in {".html", ".htm"}:
+            raise HTTPException(400, f"HTML 上传仅支持 .html/.htm，收到 {hsuf or '无扩展名'}")
+        hdata = await html_file.read()
+        if not hdata:
+            raise HTTPException(400, "上传的 HTML 文件为空")
+        if len(hdata) > 25 * 1024 * 1024:
+            raise HTTPException(400, "HTML 文件超过 25 MB 上传限制")
+        try:
+            html_src = hdata.decode("utf-8")
+        except UnicodeDecodeError:
+            html_src = hdata.decode("gb18030", errors="ignore")
+
     if not settings.llm_available():
         raise HTTPException(400, "未配置 OPENAI_API_KEY，无法使用 LLM 设计模式")
 
-    sess = design_session.create_session(content)
-    if sess is None:
-        raise HTTPException(500, "设计生成失败，请稍后重试")
+    if html_src:
+        # 导入适配模式：用自带 HTML（+可选文案）
+        sess = design_session.create_session_from_html(html_src, content)
+        if sess is None:
+            raise HTTPException(500, "HTML 导入适配失败，请稍后重试")
+    else:
+        if not content:
+            raise HTTPException(400, f"请粘贴文案/上传文案文件，或上传/粘贴已设计的 HTML")
+        sess = design_session.create_session(content)
+        if sess is None:
+            raise HTTPException(500, "设计生成失败，请稍后重试")
     return {"sid": sess.sid, "title": sess.title, "slides": sess.slides}
 
 
@@ -572,9 +603,9 @@ DESIGN_HTML = """<!doctype html>
 <style>
   :root{--bg:#0f1115;--panel:#171a21;--panel2:#1e222b;--line:#2a2f3a;--ink:#e8ebf2;--muted:#8a909e;--accent:#ff8a00;--blue:#3b82f6;}
   *{box-sizing:border-box;}
-  html,body{margin:0;height:100%;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);}
+  html,body{margin:0;height:100%;overflow:hidden;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);}
   /* 起始输入态 */
-  .start{max-width:760px;margin:0 auto;padding:64px 24px;}
+  .start{max-width:760px;margin:0 auto;padding:64px 24px;height:100%;overflow:auto;}
   .start h1{font-size:34px;font-weight:700;margin:0 0 8px;}
   .start p{color:var(--muted);margin:0 0 24px;}
   textarea{width:100%;min-height:220px;background:var(--panel);border:1px solid var(--line);border-radius:12px;color:var(--ink);padding:16px;font-size:15px;line-height:1.7;resize:vertical;font-family:inherit;}
@@ -589,14 +620,14 @@ DESIGN_HTML = """<!doctype html>
   .tabs{display:flex;gap:6px;overflow-x:auto;flex:1;}
   .tab{padding:7px 14px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:13px;cursor:pointer;white-space:nowrap;}
   .tab.active{color:var(--ink);border-color:var(--accent);}
-  .main{flex:1;display:grid;grid-template-columns:1fr 1fr;min-height:0;}
-  .pane{min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line);}
-  .pane h4{margin:0;padding:8px 14px;font-size:12px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;border-bottom:1px solid var(--line);background:var(--panel);}
-  pre{margin:0;flex:1;overflow:auto;padding:16px;font-family:"SF Mono","Consolas",monospace;font-size:12.5px;line-height:1.6;color:#cdd3df;white-space:pre-wrap;word-break:break-word;}
-  .preview-wrap{flex:1;overflow:hidden;background:#0a0a0a;display:flex;align-items:center;justify-content:center;}
+  .main{flex:1;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:minmax(0,1fr);min-height:0;overflow:hidden;}
+  .pane{min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;border-right:1px solid var(--line);}
+  .pane h4{margin:0;padding:8px 14px;font-size:12px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto;}
+  pre{margin:0;flex:1;min-height:0;overflow:auto;padding:16px;font-family:"SF Mono","Consolas",monospace;font-size:12.5px;line-height:1.6;color:#cdd3df;white-space:pre-wrap;word-break:break-word;}
+  .preview-wrap{flex:1;min-height:0;overflow:hidden;background:#0a0a0a;display:flex;align-items:center;justify-content:center;}
   .scaler{position:relative;}
   iframe{border:0;background:#fff;width:1920px;height:1080px;display:block;}
-  .steps{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap;}
+  .steps{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap;flex:0 0 auto;}
   .step-btn{padding:5px 12px;border-radius:7px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:12px;cursor:pointer;}
   .step-btn.active{color:#1a1205;background:var(--accent);border-color:var(--accent);font-weight:700;}
   .chatbar{flex:0 0 auto;display:flex;gap:10px;padding:12px 16px;border-top:1px solid var(--line);background:var(--panel);}
@@ -617,10 +648,20 @@ DESIGN_HTML = """<!doctype html>
 <!-- 起始：输入文案 -->
 <div class="start" id="start">
   <h1>PPT 设计工作台</h1>
-  <p>粘贴文案 → LLM 自主设计每页 → 左看源代码、右看渲染 → 对话微调 → 满意后生成视频。</p>
-  <textarea id="text" placeholder="在此粘贴上课文案…"></textarea>
-  <div class="row" style="margin-top:16px;">
-    <button class="btn" id="design-btn">开始设计</button>
+  <p>两种方式：① 只给文案，LLM 从头设计；② 同时给「文案 + 已设计好的 HTML」，系统直接适配你的设计（自动切分、补高亮、配口播），省去从头沟通。</p>
+  <textarea id="text" placeholder="在此粘贴课程文案（用于改写口播稿）…"></textarea>
+  <div style="margin-top:14px;">
+    <div style="font-size:13px;color:var(--muted);margin-bottom:6px;">可选：已设计好的 HTML（粘贴源代码，或上传 .html 文件）。提供后系统不再从头设计，只做工程化适配。</div>
+    <textarea id="html" placeholder="可选：在此粘贴已设计好的 PPT HTML 源代码…" style="min-height:120px;font-family:'Consolas',monospace;font-size:13px;"></textarea>
+    <div class="row" style="margin-top:8px;">
+      <label class="btn ghost" style="font-size:13px;padding:8px 16px;cursor:pointer;">＋ 上传 .html 文件
+        <input type="file" id="html-file" accept=".html,.htm" style="display:none;"/>
+      </label>
+      <span class="spin" id="html-file-name"></span>
+    </div>
+  </div>
+  <div class="row" style="margin-top:18px;">
+    <button class="btn" id="design-btn">开始设计 / 适配</button>
     <span class="spin" id="start-msg"></span>
     <a class="dl" href="/" style="margin-left:auto;">← 返回经典模式</a>
   </div>
@@ -710,15 +751,26 @@ function fitPreview(){
 }
 window.addEventListener("resize", fitPreview);
 
+let HTMLFILE=null;
+$("html-file").onchange=()=>{
+  HTMLFILE=$("html-file").files[0]||null;
+  $("html-file-name").textContent = HTMLFILE ? ("已选择："+HTMLFILE.name) : "";
+};
+
 $("design-btn").onclick=async()=>{
   const text=$("text").value.trim();
-  if(!text){ alert("请粘贴文案"); return; }
-  $("design-btn").disabled=true; $("start-msg").textContent="LLM 正在设计每一页…（约十几秒）";
-  const fd=new FormData(); fd.append("text", text);
+  const html=$("html").value.trim();
+  if(!text && !html && !HTMLFILE){ alert("请至少粘贴文案，或提供已设计的 HTML"); return; }
+  $("design-btn").disabled=true;
+  $("start-msg").textContent = (html||HTMLFILE) ? "正在适配你的 HTML…（约十几秒）" : "LLM 正在设计每一页…（约十几秒）";
+  const fd=new FormData();
+  fd.append("text", text);
+  if(html) fd.append("html", html);
+  if(HTMLFILE) fd.append("html_file", HTMLFILE);
   const r=await fetch("/api/design",{method:"POST",body:fd});
   $("design-btn").disabled=false; $("start-msg").textContent="";
   if(!r.ok){ const e=await r.json(); alert(e.detail||"设计失败"); return; }
-  const j=await r.json(); SID=j.sid; SLIDES=j.slides; CUR=0;
+  const j=await r.json(); SID=j.sid; SLIDES=j.slides; CUR=0; FOCUS=0;
   $("start").style.display="none"; $("studio").style.display="flex";
   showPage();
 };
