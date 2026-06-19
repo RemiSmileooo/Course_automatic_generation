@@ -37,6 +37,40 @@ def _no_line(shape) -> None:
     shape.line.fill.background()
 
 
+def export_image_pptx(course: Course, out_path: str | Path) -> str:
+    """用已渲染的 slide.base_image 导出"所见即所得"PPT。
+
+    每页把渲染好的整页底图作为整张幻灯片图片，保证下载的 PPT 与视频画面一致；
+    演讲者备注保留该页全部口播稿。某页无底图时回退为标题占位页。
+    """
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)   # 16:9
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+
+    for slide_data in course.slides:
+        slide = prs.slides.add_slide(blank)
+        image_path = Path(slide_data.base_image or "")
+        if image_path.is_file():
+            slide.shapes.add_picture(
+                str(image_path), 0, 0,
+                width=prs.slide_width, height=prs.slide_height,
+            )
+        else:
+            th = THEMES.get(settings.theme_name, THEMES["apple"])
+            _set_bg(slide, th.bg_top)
+            _build_title(slide, slide_data.title, th, prs.slide_width)
+
+        scripts = [seg.script for seg in slide_data.segments if seg.script]
+        if scripts:
+            slide.notes_slide.notes_text_frame.text = "\n\n".join(scripts)
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    prs.save(str(out_path))
+    return str(out_path)
+
+
 def export_pptx(course: Course, out_path: str | Path, theme_name: str | None = None) -> str:
     th = THEMES.get(theme_name or settings.theme_name, THEMES["apple"])
     prs = Presentation()

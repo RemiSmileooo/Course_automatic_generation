@@ -7,6 +7,18 @@
 - 每个处理阶段的结构化 `JSON`、音频和图片中间产物
 
 项目同时提供命令行入口和 FastAPI Web 界面，支持多套视觉主题、MiniMax 音色选择，以及 LLM/TTS 失败时的自动降级。
+
+> **页面设计模式（`SLIDE_RENDERER`）**：默认 `llm` 模式下，由 LLM 端到端「自主设计」每页的 HTML 版式与口播稿——给一段文案，LLM 决定分几页、每页用什么布局（分栏 / 网格 / 时间线 / 大字 / 对照 / 卡片流…）并直接产出 HTML，套用统一的「浅色暖橙」设计系统（`src/slide_design.py`）保证整套视觉一致而布局不雷同。
+> 关键约束：**字幕始终由代码逐句切分并叠加，与 TTS 音频对齐**（不交给 LLM）；LLM 产物经轻量校验，单页异常回退固定模板，无 Key/调用失败回退规则拆课，浏览器不可用回退 Pillow——保证永远能出片。
+> 也可设 `SLIDE_RENDERER=html`（代码内置 HTML 模板）或 `pillow`（旧版位图）。
+
+> **🎨 PPT 设计工作台（`/design`）**：Web 端提供"先设计、再生产"的工作流——
+> 1. 粘贴文案 → LLM 自主设计整套 PPT（只设计，秒级，不配音/不编码）；
+> 2. 三区界面预览：左看每页 **HTML 源代码**、右看**实时渲染**，顶部页签切换；
+> 3. 底部**对话框**与 LLM 直接对话微调（"第3页改成时间线""整体配色淡一点""封面更大气"），单页或整套都行，多轮迭代；
+> 4. 满意后点**「确认，生成视频」**才走 TTS → 字幕 → 合成。
+> 接口：`POST /api/design`（创建）、`POST /api/design/{sid}/revise`（对话修改）、`POST /api/design/{sid}/produce`（确认生产）。设计会话存于 `runs/.sessions/`。经典一条龙模式仍在首页保留。
+
 <img width="1912" height="914" alt="image" src="https://github.com/user-attachments/assets/3122f7d1-52e4-425f-b862-0b0fc982a575" />
 <img width="1912" height="914" alt="image" src="https://github.com/user-attachments/assets/e40a162f-0ac1-4163-a0f3-f6efe5bc53d0" />
 

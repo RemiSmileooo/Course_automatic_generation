@@ -172,6 +172,9 @@ class Settings:
     width: int = field(default_factory=lambda: int(os.getenv("VIDEO_WIDTH", "1920")))
     height: int = field(default_factory=lambda: int(os.getenv("VIDEO_HEIGHT", "1080")))
     fps: int = field(default_factory=lambda: int(os.getenv("VIDEO_FPS", "24")))
+    # 幻灯片渲染器: llm(LLM 端到端生成 HTML，默认) | html(代码模板 HTML) | pillow(位图绘制)。
+    # llm 不可用(无 Key/失败)时回退规则拆课 + 兜底模板；浏览器不可用时回退 pillow。
+    slide_renderer: str = field(default_factory=lambda: os.getenv("SLIDE_RENDERER", "llm").lower())
 
     # ---- 字体 ----
     font_regular: str = field(default_factory=lambda: _find_cjk_font(bold=False))

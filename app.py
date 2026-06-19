@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 
-from src import pipeline
+from src import pipeline, design_session
 from src.config import settings, MINIMAX_VOICES, MINIMAX_VOICE_IDS, THEMES
 from src.documents import DocumentParseError, parse_document, supported_file_hint
 
@@ -185,6 +185,105 @@ async def pptx(job_id: str):
     )
 
 
+# --------------------------------------------------------------------------- #
+# 设计-预览-对话修改-确认 工作流
+# --------------------------------------------------------------------------- #
+def _design_produce_worker(job_id: str, sid: str, subtitle: bool, voice: str):
+    job = JOBS[job_id]
+    run_dir = RUNS / job_id
+
+    def cb(p: float, m: str):
+        job["progress"] = round(p, 3)
+        job["message"] = m
+
+    try:
+        job["status"] = "running"
+        result = design_session.produce(sid, run_dir, progress_cb=cb, subtitle=subtitle, voice=voice)
+        if result is None:
+            raise RuntimeError("设计会话不存在或无法生产")
+        job["status"] = "done"
+        job["result"] = result
+        job["progress"] = 1.0
+        job["message"] = "完成"
+    except Exception as e:  # noqa: BLE001
+        if not _recover_completed_job(job_id, job):
+            job["status"] = "error"
+            job["error"] = str(e)
+            job["message"] = f"出错: {e}"
+
+
+@app.post("/api/design")
+async def design_create(text: str = Form(default=""), file: UploadFile | None = File(default=None)):
+    content = text.strip()
+    if file is not None:
+        name = file.filename or ""
+        data = await file.read()
+        suffix = Path(name).suffix.lower()
+        if suffix not in {".txt", ".md", ".markdown", ".pdf", ".docx"}:
+            raise HTTPException(400, f"不支持 {suffix or '无扩展名'} 文件；当前支持 {supported_file_hint()}")
+        if not data:
+            raise HTTPException(400, "上传文件为空")
+        if len(data) > 25 * 1024 * 1024:
+            raise HTTPException(400, "文件超过 25 MB 上传限制")
+        content = parse_document(name, data)
+    if not content:
+        raise HTTPException(400, f"请粘贴文案或上传文件（{supported_file_hint()}）")
+    if not settings.llm_available():
+        raise HTTPException(400, "未配置 OPENAI_API_KEY，无法使用 LLM 设计模式")
+
+    sess = design_session.create_session(content)
+    if sess is None:
+        raise HTTPException(500, "设计生成失败，请稍后重试")
+    return {"sid": sess.sid, "title": sess.title, "slides": sess.slides}
+
+
+@app.get("/api/design/{sid}")
+async def design_get(sid: str):
+    sess = design_session.get_session(sid)
+    if sess is None:
+        raise HTTPException(404, "设计会话不存在")
+    return {"sid": sess.sid, "title": sess.title, "slides": sess.slides, "history": sess.history}
+
+
+@app.post("/api/design/{sid}/revise")
+async def design_revise(sid: str, instruction: str = Form(...)):
+    if not instruction.strip():
+        raise HTTPException(400, "修改指令为空")
+    sess = design_session.revise_session(sid, instruction)
+    if sess is None:
+        raise HTTPException(404, "设计会话不存在")
+    last = sess.history[-1]["content"] if sess.history else ""
+    return {"sid": sess.sid, "title": sess.title, "slides": sess.slides, "reply": last}
+
+
+@app.post("/api/design/{sid}/produce")
+async def design_produce(sid: str, subtitle: bool = Form(default=True), voice: str = Form(default="")):
+    sess = design_session.get_session(sid)
+    if sess is None:
+        raise HTTPException(404, "设计会话不存在")
+    voice = voice if voice in MINIMAX_VOICE_IDS else settings.minimax_voice
+    job_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
+    JOBS[job_id] = {"progress": 0.0, "message": "排队中…", "status": "queued"}
+    threading.Thread(
+        target=_design_produce_worker,
+        args=(job_id, sid, subtitle, voice),
+        daemon=True,
+    ).start()
+    return {"job_id": job_id}
+
+
+@app.get("/api/design-css")
+async def design_css():
+    """返回设计系统 base CSS，供前端预览 iframe 注入。"""
+    from src import slide_design
+    return JSONResponse({"css": slide_design.base_css()})
+
+
+@app.get("/design", response_class=HTMLResponse)
+async def design_page():
+    return DESIGN_HTML
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     llm_label = f"OpenAI · {settings.openai_model}" if settings.llm_available() else "规则兜底（未配置 Key）"
@@ -294,6 +393,9 @@ HTML = """<!doctype html>
     <div class="badges">
       <span class="badge">LLM · {{LLM}}</span>
       <span class="badge">TTS · {{TTS}}</span>
+    </div>
+    <div style="margin-top:18px;">
+      <a href="/design" style="color:var(--blue);text-decoration:none;font-weight:600;font-size:15px;">✨ 进入「PPT 设计工作台」：先设计、对话微调、满意再生成 →</a>
     </div>
   </div>
 
@@ -455,6 +557,213 @@ if(resumeJob){
   $("prog-card").classList.remove("hidden");
   setBar(0.98, "正在恢复已完成任务…");
   poll(resumeJob);
+}
+</script>
+</body>
+</html>"""
+
+
+DESIGN_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>PPT 设计工作台</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--panel2:#1e222b;--line:#2a2f3a;--ink:#e8ebf2;--muted:#8a909e;--accent:#ff8a00;--blue:#3b82f6;}
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);}
+  /* 起始输入态 */
+  .start{max-width:760px;margin:0 auto;padding:64px 24px;}
+  .start h1{font-size:34px;font-weight:700;margin:0 0 8px;}
+  .start p{color:var(--muted);margin:0 0 24px;}
+  textarea{width:100%;min-height:220px;background:var(--panel);border:1px solid var(--line);border-radius:12px;color:var(--ink);padding:16px;font-size:15px;line-height:1.7;resize:vertical;font-family:inherit;}
+  .btn{background:var(--accent);color:#1a1205;border:0;border-radius:10px;padding:12px 28px;font-size:16px;font-weight:700;cursor:pointer;}
+  .btn:disabled{opacity:.5;cursor:not-allowed;}
+  .btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);}
+  .btn.blue{background:var(--blue);color:#fff;}
+  .row{display:flex;gap:12px;align-items:center;}
+  /* 工作台三区 */
+  .studio{display:none;height:100vh;flex-direction:column;}
+  .topbar{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto;}
+  .tabs{display:flex;gap:6px;overflow-x:auto;flex:1;}
+  .tab{padding:7px 14px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:13px;cursor:pointer;white-space:nowrap;}
+  .tab.active{color:var(--ink);border-color:var(--accent);}
+  .main{flex:1;display:grid;grid-template-columns:1fr 1fr;min-height:0;}
+  .pane{min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--line);}
+  .pane h4{margin:0;padding:8px 14px;font-size:12px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;border-bottom:1px solid var(--line);background:var(--panel);}
+  pre{margin:0;flex:1;overflow:auto;padding:16px;font-family:"SF Mono","Consolas",monospace;font-size:12.5px;line-height:1.6;color:#cdd3df;white-space:pre-wrap;word-break:break-word;}
+  .preview-wrap{flex:1;overflow:hidden;background:#0a0a0a;display:flex;align-items:center;justify-content:center;}
+  .scaler{position:relative;}
+  iframe{border:0;background:#fff;width:1920px;height:1080px;display:block;}
+  .steps{display:flex;gap:6px;padding:8px 14px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap;}
+  .step-btn{padding:5px 12px;border-radius:7px;background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:12px;cursor:pointer;}
+  .step-btn.active{color:#1a1205;background:var(--accent);border-color:var(--accent);font-weight:700;}
+  .chatbar{flex:0 0 auto;display:flex;gap:10px;padding:12px 16px;border-top:1px solid var(--line);background:var(--panel);}
+  .chatbar input{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--ink);padding:11px 14px;font-size:14px;font-family:inherit;}
+  .chatbar input:focus{outline:none;border-color:var(--accent);}
+  .msg{padding:8px 16px;font-size:13px;color:var(--muted);}
+  .overlay{position:fixed;inset:0;background:rgba(8,10,14,.82);display:none;align-items:center;justify-content:center;flex-direction:column;gap:18px;z-index:50;}
+  .overlay.show{display:flex;}
+  .prog{width:420px;height:8px;background:#262b35;border-radius:99px;overflow:hidden;}
+  .prog>span{display:block;height:100%;width:0;background:var(--accent);transition:width .3s;}
+  video{max-width:80vw;max-height:70vh;border-radius:10px;background:#000;}
+  a.dl{color:var(--accent);text-decoration:none;font-weight:600;margin:0 12px;}
+  .spin{color:var(--muted);font-size:14px;}
+</style>
+</head>
+<body>
+
+<!-- 起始：输入文案 -->
+<div class="start" id="start">
+  <h1>PPT 设计工作台</h1>
+  <p>粘贴文案 → LLM 自主设计每页 → 左看源代码、右看渲染 → 对话微调 → 满意后生成视频。</p>
+  <textarea id="text" placeholder="在此粘贴上课文案…"></textarea>
+  <div class="row" style="margin-top:16px;">
+    <button class="btn" id="design-btn">开始设计</button>
+    <span class="spin" id="start-msg"></span>
+    <a class="dl" href="/" style="margin-left:auto;">← 返回经典模式</a>
+  </div>
+</div>
+
+<!-- 工作台 -->
+<div class="studio" id="studio">
+  <div class="topbar">
+    <div class="tabs" id="tabs"></div>
+    <button class="btn ghost" id="reset-btn">重新设计</button>
+    <button class="btn blue" id="produce-btn">✅ 确认，生成视频</button>
+  </div>
+  <div class="main">
+    <div class="pane">
+      <h4>HTML 源代码（当前页）</h4>
+      <pre id="code"></pre>
+    </div>
+    <div class="pane" style="border-right:0;">
+      <h4>实时渲染预览</h4>
+      <div class="steps" id="steps"></div>
+      <div class="preview-wrap"><div class="scaler" id="scaler"><iframe id="preview"></iframe></div></div>
+    </div>
+  </div>
+  <div class="msg" id="chat-msg"></div>
+  <div class="chatbar">
+    <input id="chat" placeholder="对话微调，如：把第3页改成时间线 / 整体配色淡一点 / 封面再大气些"/>
+    <button class="btn" id="send-btn">发送</button>
+  </div>
+</div>
+
+<!-- 生产进度/结果 -->
+<div class="overlay" id="overlay">
+  <div id="ov-prog-box">
+    <div class="prog"><span id="bar"></span></div>
+    <div class="spin" id="ov-msg" style="text-align:center;margin-top:12px;">准备中…</div>
+  </div>
+  <div id="ov-result" style="display:none;text-align:center;">
+    <video id="video" controls></video>
+    <div style="margin-top:14px;">
+      <a class="dl" id="dl-mp4" download>下载 MP4 ↓</a>
+      <a class="dl" id="dl-ppt" download>下载 PPT ↓</a>
+      <a class="dl" href="/design" style="cursor:pointer;">再做一个</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let SID=null, SLIDES=[], CUR=0, FOCUS=0, BASECSS="", timer=null;
+
+const HL_CSS = `.hl-on{outline:4px solid var(--accent);outline-offset:6px;border-radius:14px;box-shadow:0 0 0 6px color-mix(in srgb,var(--accent) 22%,transparent);} .hl-dim{opacity:.38;filter:saturate(.7);}`;
+
+async function loadCss(){ const r=await fetch("/api/design-css"); BASECSS=(await r.json()).css; }
+loadCss();
+
+function renderTabs(){
+  $("tabs").innerHTML = SLIDES.map((s,i)=>`<div class="tab${i===CUR?' active':''}" data-i="${i}">第 ${i+1} 页</div>`).join("");
+  document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{CUR=+t.dataset.i; FOCUS=0; showPage();});
+}
+function renderSteps(){
+  const s=SLIDES[CUR]||{}; const steps=s.steps||[];
+  let html = `<span class="step-btn${FOCUS===0?' active':''}" data-f="0">基础页</span>`;
+  // 收集所有 focus>0 的编号
+  const focuses=[...new Set(steps.map(x=>x.focus).filter(f=>f>0))].sort((a,b)=>a-b);
+  html += focuses.map(f=>`<span class="step-btn${FOCUS===f?' active':''}" data-f="${f}">高亮 ${f}</span>`).join("");
+  $("steps").innerHTML = html;
+  document.querySelectorAll("#steps .step-btn").forEach(b=>b.onclick=()=>{FOCUS=+b.dataset.f; showPage();});
+}
+function showPage(){
+  renderTabs(); renderSteps();
+  const s=SLIDES[CUR]||{};
+  $("code").textContent = s.html || "(空)";
+  const applier=`<script>(function(){var f=${FOCUS};document.querySelectorAll('[data-hl]').forEach(function(el){el.classList.remove('hl-on','hl-dim');if(f>0){if(String(el.getAttribute('data-hl'))===String(f))el.classList.add('hl-on');else el.classList.add('hl-dim');}});})();<\\/script>`;
+  const doc=`<!doctype html><html><head><meta charset="utf-8"><style>${BASECSS}\n${HL_CSS}</style></head><body>${s.html||""}${applier}</body></html>`;
+  $("preview").srcdoc=doc;
+  fitPreview();
+}
+function fitPreview(){
+  const ifr=$("preview"), scaler=$("scaler"), wrap=ifr.closest(".preview-wrap");
+  if(!wrap) return;
+  const pad=24;
+  const scale=Math.min((wrap.clientWidth-pad)/1920, (wrap.clientHeight-pad)/1080);
+  ifr.style.transform=`scale(${scale})`;
+  ifr.style.transformOrigin="top left";
+  scaler.style.width=(1920*scale)+"px";
+  scaler.style.height=(1080*scale)+"px";
+}
+window.addEventListener("resize", fitPreview);
+
+$("design-btn").onclick=async()=>{
+  const text=$("text").value.trim();
+  if(!text){ alert("请粘贴文案"); return; }
+  $("design-btn").disabled=true; $("start-msg").textContent="LLM 正在设计每一页…（约十几秒）";
+  const fd=new FormData(); fd.append("text", text);
+  const r=await fetch("/api/design",{method:"POST",body:fd});
+  $("design-btn").disabled=false; $("start-msg").textContent="";
+  if(!r.ok){ const e=await r.json(); alert(e.detail||"设计失败"); return; }
+  const j=await r.json(); SID=j.sid; SLIDES=j.slides; CUR=0;
+  $("start").style.display="none"; $("studio").style.display="flex";
+  showPage();
+};
+
+$("send-btn").onclick=async()=>{
+  const instr=$("chat").value.trim();
+  if(!instr||!SID) return;
+  $("send-btn").disabled=true; $("chat-msg").textContent="正在按要求修改…";
+  const fd=new FormData(); fd.append("instruction", instr);
+  const r=await fetch(`/api/design/${SID}/revise`,{method:"POST",body:fd});
+  $("send-btn").disabled=false;
+  if(!r.ok){ $("chat-msg").textContent="修改失败"; return; }
+  const j=await r.json(); SLIDES=j.slides; $("chat").value=""; FOCUS=0;
+  $("chat-msg").textContent = j.reply || "已更新";
+  showPage();
+};
+$("chat").addEventListener("keydown",e=>{ if(e.key==="Enter") $("send-btn").click(); });
+
+$("reset-btn").onclick=()=>{ location.href="/design"; };
+
+$("produce-btn").onclick=async()=>{
+  if(!SID) return;
+  const fd=new FormData(); fd.append("subtitle","true");
+  const r=await fetch(`/api/design/${SID}/produce`,{method:"POST",body:fd});
+  if(!r.ok){ const e=await r.json(); alert(e.detail||"无法生成"); return; }
+  const {job_id}=await r.json();
+  $("overlay").classList.add("show");
+  poll(job_id);
+};
+
+function poll(job_id){
+  timer=setInterval(async()=>{
+    const r=await fetch("/api/status/"+job_id); const j=await r.json();
+    $("bar").style.width=((j.progress||0)*100).toFixed(1)+"%";
+    $("ov-msg").textContent=(j.message||"")+"  ·  "+((j.progress||0)*100).toFixed(0)+"%";
+    if(j.status==="done"){ clearInterval(timer); showResult(job_id,j.result); }
+    else if(j.status==="error"){ clearInterval(timer); $("ov-msg").textContent="生成失败："+(j.error||""); }
+  },1200);
+}
+function showResult(job_id,res){
+  $("ov-prog-box").style.display="none"; $("ov-result").style.display="block";
+  $("video").src="/api/video/"+job_id;
+  $("dl-mp4").href="/api/video/"+job_id;
+  $("dl-ppt").href="/api/pptx/"+job_id;
+  $("dl-ppt").style.display=res && res.pptx ? "inline":"none";
 }
 </script>
 </body>

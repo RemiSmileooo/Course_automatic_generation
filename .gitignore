@@ -8,3 +8,15 @@ runs/
 *.mp3
 *.wav
 .DS_Store
+
+# 编辑器
+.vscode/
+
+# 第三方源码（本项目当前未使用，仅本地参考）
+.vendor/
+
+# 大体积 / 本地产物，不入库
+*.pptx
+*.pdf
+mineru_parsed_course.md
+mineru_parsed_course.normalized.md

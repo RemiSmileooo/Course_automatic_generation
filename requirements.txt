@@ -27,3 +27,6 @@ edge-tts>=6.1.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 python-multipart>=0.0.9
+
+# Testing
+pytest>=8.0.0

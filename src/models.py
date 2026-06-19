@@ -53,6 +53,7 @@ class Slide:
 
     # 运行期填充
     base_image: Optional[str] = None
+    content_html: Optional[str] = None  # LLM 端到端生成的该页"内容层"HTML
 
 
 @dataclass
@@ -90,6 +91,7 @@ class Course:
                     index=s.get("index", i),
                     kind=s.get("kind", "content"),
                     base_image=s.get("base_image"),
+                    content_html=s.get("content_html"),
                 )
             )
         return Course(title=d["title"], subtitle=d.get("subtitle", ""), slides=slides)
