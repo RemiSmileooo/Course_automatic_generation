@@ -37,15 +37,25 @@ def _client():
 def _chat_json(system: str, user: str) -> dict:
     """调用 LLM 并强制返回 JSON 对象。"""
     client = _client()
-    resp = client.chat.completions.create(
-        model=settings.openai_model,
-        messages=[
+    kwargs = {
+        "model": settings.openai_model,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.4,
-        response_format={"type": "json_object"},
-    )
+        "temperature": 0.4,
+        "response_format": {"type": "json_object"},
+    }
+    extra_body = settings.llm_extra_body()
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    try:
+        resp = client.chat.completions.create(**kwargs)
+    except Exception:
+        if "extra_body" not in kwargs:
+            raise
+        kwargs.pop("extra_body")
+        resp = client.chat.completions.create(**kwargs)
     content = resp.choices[0].message.content or "{}"
     return json.loads(content)
 

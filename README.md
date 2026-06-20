@@ -169,8 +169,9 @@ python main.py --input data/sample_input.txt --no-subtitle
 | `OPENAI_API_KEY` | OpenAI-compatible API Key |
 | `OPENAI_BASE_URL` | API 地址，例如 OpenAI 或 DeepSeek 兼容网关 |
 | `OPENAI_MODEL` | 模型名 |
+| `OPENAI_REASONING_EFFORT` | 可选推理强度：`minimal`、`low`、`medium`、`high` |
 
-LLM 未配置时，经典模式会使用规则兜底；设计工作台需要可用 LLM。
+LLM 未配置时，经典模式会使用规则兜底；设计工作台需要可用 LLM。若当前模型或网关不支持 `reasoning_effort`，系统会自动去掉该参数重试一次。
 
 ### MinerU PDF 解析
 

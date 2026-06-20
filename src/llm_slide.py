@@ -251,15 +251,25 @@ def _chat(system: str, user: str) -> str:
         base_url=settings.openai_base_url,
         http_client=httpx.Client(trust_env=False),
     )
-    resp = client.chat.completions.create(
-        model=settings.openai_model,
-        messages=[
+    kwargs = {
+        "model": settings.openai_model,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        temperature=0.6,
-        response_format={"type": "json_object"},
-    )
+        "temperature": 0.6,
+        "response_format": {"type": "json_object"},
+    }
+    extra_body = settings.llm_extra_body()
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    try:
+        resp = client.chat.completions.create(**kwargs)
+    except Exception:
+        if "extra_body" not in kwargs:
+            raise
+        kwargs.pop("extra_body")
+        resp = client.chat.completions.create(**kwargs)
     return resp.choices[0].message.content or ""
 
 
@@ -370,6 +380,8 @@ def _cache_key(text: str) -> str:
     h.update(slide_design.DESIGN_SYSTEM_VERSION.encode("utf-8"))
     h.update(b"|")
     h.update((settings.openai_model or "").encode("utf-8"))
+    h.update(b"|")
+    h.update((settings.openai_reasoning_effort or "").encode("utf-8"))
     return h.hexdigest()[:24]
 
 
